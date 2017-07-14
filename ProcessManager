@@ -1,0 +1,112 @@
+# -*- coding: utf-8 -*-
+import os
+import time
+import copy
+import signal
+import logging
+from multiprocessing import Process
+
+LOG = logging.getLogger(__name__)
+
+
+class ProcessManage(object):
+
+    def __init__(self, wait_kill_time=1):
+        self.process_map = {}
+        self.wait_kill_time = wait_kill_time
+        self.pid = os.getpid()
+        self.sigterm_default_handler = signal.getsignal(signal.SIGTERM)
+
+    def add_process(self, function, *args, **kwargs):
+        process = Process(target=function, args=args, kwargs=kwargs)
+        process.start()
+        self.process_map[process.pid] = {'pid': process.pid,
+                                         'function': function,
+                                         'args': args,
+                                         'kwargs': kwargs,
+                                         'Process': process
+                                         }
+
+    def run(self):
+        """
+            monitor process status and restart process
+            !!!
+                note:
+                subprocess will copy parent process, the signal handler will copy
+                so, when parent process handler signal,
+                handler function must judge current process is parent process or child process.
+
+                if child process handle the same of signal, child handle function will execute,
+                else copy parent process handle function will execute
+            !!!
+        :return:
+        """
+
+        signal.signal(signal.SIGTERM, self.kill_process)
+        while True:
+            try:
+                self.check_process()
+                pid, exit_status = os.wait()
+                if pid not in self.process_map:
+                    continue
+                self.restart_process(pid)
+            except OSError:
+                break
+
+    def restart_process(self, pid):
+        """
+            restart process
+        :param pid:
+        :return:
+        """
+        self.process_map[pid]['Process'].join(1)
+        self.add_process(self.process_map[pid]['function'],
+                         self.process_map[pid]['args'],
+                         self.process_map[pid]['kwargs']
+                         )
+        del self.process_map[pid]
+
+    def check_process(self):
+        """
+            check process status and restart
+        :return:
+        """
+        for pid, mapping in self.process_map.iteritems():
+            if not mapping['Process'].is_alive():
+                self.restart_process(pid)
+
+    def kill_process(self, *args):
+        """
+            kill all process
+        :return:
+        """
+        # current process pid not equal parent pid, so current process is child process
+        # if child process not handle this signal , the function will execute
+        process_map = copy.deepcopy(self.process_map)
+        self.process_map = {}
+        if os.getpid() != self.pid:
+            if callable(self.sigterm_default_handler):
+                return self.sigterm_default_handler(*args)
+            elif self.sigterm_default_handler is not None:
+                return signal.default_int_handler(signal.SIGTERM)(*args)
+            else:
+                return
+
+        # terminate process: send signal to child process
+        for process in process_map.itervalues():
+            process['Process'].terminate()
+
+        end_time = time.time() + self.wait_kill_time
+
+        while process_map and time.time() < end_time:
+            for process in process_map.itervalues():
+
+                process['Process'].join(0)
+
+        for pid, process in process_map.iteritems():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            del process_map[pid]
+           
